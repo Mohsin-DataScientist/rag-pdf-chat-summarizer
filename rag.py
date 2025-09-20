@@ -9,111 +9,164 @@ sys.modules["tensorflow"] = None
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
-from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain.chains import create_history_aware_retriever, create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
+
 from langchain_community.document_loaders import PyPDFLoader
-from langchain_core.output_parsers import StrOutputParser
+from langchain_community.chat_message_histories import ChatMessageHistory
+from langchain_community.vectorstores import FAISS   # ✅ FAISS instead of Chroma
 
-# Load environment variables
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_huggingface import HuggingFaceEmbeddings
+
+# Load env
 load_dotenv()
-groq_key = os.getenv("GROQ_API_KEY")
 
-# Streamlit app setup
-st.set_page_config(page_title="📚 PDF Chat + Summary", layout="wide")
-st.title("📚 PDF Q&A + Summarizer")
+# --- Streamlit page setup ---
+st.set_page_config(page_title="📄 RAG Q&A", layout="wide")
+st.title("📄 RAG Q&A with Multiple PDFs + Chat History + Summarizer")
 
-# Sidebar settings
+# --- Sidebar controls ---
 with st.sidebar:
-    st.header("⚙️ Settings")
-    model_name = st.selectbox("Select Model:", ["llama3-8b-8192", "mixtral-8x7b-32768"], index=0)
-    temp = st.slider("Temperature:", 0.0, 1.0, 0.3)
+    st.header("⚙️ Config")
 
-# Initialize embedding model
+    # API key
+    api_key = st.text_input("Groq API Key", type="password")
+
+    # Model params
+    temperature = st.slider("🌡️ Temperature", 0.0, 1.0, 0.7)
+    chunk_size = st.slider("📏 Chunk Size", 500, 2000, 1000, step=100)
+    chunk_overlap = st.slider("🔄 Chunk Overlap", 0, 500, 150, step=50)
+
+    # Vectorstore reset (not needed for FAISS but kept optional)
+    if st.button("🗑️ Reset Vectorstore"):
+        if "vectorstore" in st.session_state:
+            del st.session_state["vectorstore"]
+            st.success("✅ FAISS vectorstore cleared. Please re-upload PDFs.")
+
+    st.caption("Upload PDFs → Ask Questions → Summarize or Chat")
+
+# API key check
+if not api_key:
+    st.warning("⚠️ Please enter your Groq API Key in the sidebar.")
+    st.stop()
+
+# --- LLM + Embeddings ---
+llm = ChatGroq(groq_api_key=api_key, model_name="gemma2-9b-it", temperature=temperature)
 embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
-# File uploader
-uploaded_files = st.file_uploader("📂 Upload PDF files", type=["pdf"], accept_multiple_files=True)
+# --- File upload ---
+uploaded_files = st.file_uploader("📚 Upload PDF files", type="pdf", accept_multiple_files=True)
+all_docs = []
 
-# ---------------- PDF Processing ----------------
 if uploaded_files:
-    all_docs = []
-    pdf_texts = {}  # store text for each file
+    for pdf in uploaded_files:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            tmp.write(pdf.getvalue())
+            loader = PyPDFLoader(tmp.name)
+            docs = loader.load()
+            for d in docs:
+                d.metadata["source_file"] = pdf.name
+            all_docs.extend(docs)
 
-    for uploaded_file in uploaded_files:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-            tmp_file.write(uploaded_file.read())
-            tmp_path = tmp_file.name
-        loader = PyPDFLoader(tmp_path)
-        docs = loader.load()
-        all_docs.extend(docs)
+    st.success(f"✅ Loaded {len(all_docs)} pages from {len(uploaded_files)} PDFs")
+else:
+    st.info("ℹ️ Please upload one or more PDFs to begin.")
+    st.stop()
 
-        # Store raw text per file
-        pdf_texts[uploaded_file.name] = "\n\n".join([doc.page_content for doc in docs])
+# --- Split into chunks ---
+text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+splits = text_splitter.split_documents(all_docs)
 
-    # Split documents into chunks
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    splits = text_splitter.split_documents(all_docs)
+# --- Vectorstore (FAISS) ---
+@st.cache_resource
+def get_vectorstore(_splits):
+    return FAISS.from_documents(_splits, embeddings)   # ✅ replaced Chroma with FAISS
 
-    # Create FAISS vectorstore
-    vectorstore = FAISS.from_documents(splits, embeddings)
-    retriever = vectorstore.as_retriever()
+vectorstore = get_vectorstore(splits)
+retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
 
-    # ---------------- LLM Setup ----------------
-    llm = ChatGroq(model=model_name, api_key=groq_key, temperature=temp)
+st.sidebar.write(f"🔍 Indexed {len(splits)} chunks into FAISS vectorstore")
 
-    # Q/A chain
-    qa_prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are a helpful assistant for answering questions from a set of documents."),
-        MessagesPlaceholder("chat_history"),
-        ("human", "{question}"),
-    ])
-    parser = StrOutputParser()
-    qa_chain = qa_prompt | llm | parser
+# --- History-aware retriever ---
+contextualize_q_prompt = ChatPromptTemplate.from_messages([
+    ("system", "Rephrase user questions using chat history."),
+    MessagesPlaceholder("chat_history"),
+    ("human", "{input}"),
+])
+history_aware_retriever = create_history_aware_retriever(llm, retriever, contextualize_q_prompt)
 
-    # Chat history
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []
+# --- QA chain ---
+qa_prompt = ChatPromptTemplate.from_messages([
+    ("system", "You are an assistant. Use the retrieved context below:\n\n{context}"),
+    MessagesPlaceholder("chat_history"),
+    ("human", "{input}"),
+])
+qa_chain = create_stuff_documents_chain(llm, qa_prompt)
+rag_chain = create_retrieval_chain(history_aware_retriever, qa_chain)
 
-    # ---------------- Summarizer ----------------
-    def summarize_pdfs(text: str):
-        """Summarize into max 10 lines"""
-        prompt = f"Summarize the following document into **maximum 10 sentences**:\n\n{text[:12000]}"
-        resp = llm.invoke(prompt)
-        summary = resp.content
-        return "\n".join(summary.splitlines()[:10])
+# --- Session state ---
+if "chathistory" not in st.session_state:
+    st.session_state.chathistory = {}
 
-    # ---------------- Tabs Layout ----------------
-    tab1, tab2 = st.tabs(["💬 Chatbot (Q/A)", "📑 Summarizer"])
+def get_history(session_id: str):
+    if session_id not in st.session_state.chathistory:
+        st.session_state.chathistory[session_id] = ChatMessageHistory()
+    return st.session_state.chathistory[session_id]
 
-    # --- Chat Mode ---
-    with tab1:
-        st.subheader("💬 Ask Questions About Your PDFs")
-        user_input = st.text_input("Ask a question:")
-        if st.button("🚀 Get Answer"):
-            if user_input:
-                context = retriever.get_relevant_documents(user_input)
-                response = qa_chain.invoke({"question": user_input, "chat_history": st.session_state.chat_history})
-                st.session_state.chat_history.append(("User", user_input))
-                st.session_state.chat_history.append(("Assistant", response))
-                st.write("### 🤖 Answer")
-                st.write(response)
+conversational_rag = RunnableWithMessageHistory(
+    rag_chain,
+    get_history,
+    input_messages_key="input",
+    history_messages_key="chat_history",
+    output_messages_key="answer",
+)
 
-        if st.session_state.chat_history:
-            st.write("### 📜 Chat History")
-            for role, msg in st.session_state.chat_history:
-                st.write(f"**{role}:** {msg}")
+# --- Simple summarizer (max 10 sentences) ---
+def summarize_pdfs(text: str):
+    prompt = f"Summarize the following document into **maximum 10 sentences**:\n\n{text[:12000]}"
+    resp = llm.invoke(prompt)
+    return resp.content
 
-    # --- Summarize Mode ---
-    with tab2:
-        st.subheader("📑 Summaries of Uploaded PDFs")
-        for file_name, text in pdf_texts.items():
-            if st.button(f"📑 Summarize {file_name}"):
-                summary = summarize_pdfs(text)
-                st.write(f"### 📄 {file_name}")
-                st.write(summary)
-                st.download_button(
-                    f"⬇️ Download {file_name} Summary",
-                    data=summary,
-                    file_name=f"{file_name}_summary.txt"
-                )
+# --- Main Tabs ---
+tab1, tab2 = st.tabs(["💬 Chat Mode", "📑 Summarize Mode"])
+
+# --- Chat Mode ---
+with tab1:
+    session_id = st.text_input("🆔 Session ID", value="default_session")
+    user_q = st.chat_input("💬 Ask your question...")
+
+    if user_q:
+        history = get_history(session_id)
+        result = conversational_rag.invoke(
+            {"input": user_q}, config={"configurable": {"session_id": session_id}}
+        )
+
+        st.chat_message("user").write(user_q)
+        st.chat_message("assistant").write(result["answer"])
+
+        # Retrieved chunks
+        if "context" in result:
+            with st.expander("📑 Retrieved Chunks"):
+                for doc in result["context"]:
+                    st.write(f"📄 {doc.metadata.get('source_file','Unknown')} (p{doc.metadata.get('page','?')}):")
+                    st.write(doc.page_content[:300] + "…")
+
+        # Chat history
+        with st.expander("📖 Chat History"):
+            for msg in history.messages:
+                role = getattr(msg, "role", msg.type).title()
+                st.write(f"**{role}:** {msg.content}")
+
+        # Download chat
+        chat_text = "\n".join([f"{msg.type}: {msg.content}" for msg in history.messages])
+        st.download_button("⬇️ Download Chat History", data=chat_text, file_name="chat_history.txt")
+
+# --- Summarize Mode ---
+with tab2:
+    if st.button("📑 Generate Summary"):
+        all_text = "\n\n".join([doc.page_content for doc in all_docs])
+        summary = summarize_pdfs(all_text)
+        st.subheader("📑 Summary of PDFs")
+        st.write(summary)
+        st.download_button("⬇️ Download Summary", data=summary, file_name="pdf_summary.txt")
