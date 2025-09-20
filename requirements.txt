@@ -12,13 +12,13 @@ langchain-chroma==0.2.5
 langchain-text-splitters==0.3.11
 langchain-openai==0.3.6
 
-# Vector store
-chromadb==0.5.5   # ✅ stable with langchain-chroma 0.2.5
+# Vector store (must match langchain-chroma >=1.0.9)
+chromadb==1.0.21
 
 # NLP + embeddings (PyTorch-only, no TensorFlow)
 sentence-transformers==2.7.0
 huggingface-hub==0.34.4
-torch==2.3.1 --extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.3.1
 numpy==1.26.4
 
 # PDF loader
