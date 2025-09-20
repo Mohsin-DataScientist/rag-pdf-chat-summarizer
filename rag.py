@@ -14,10 +14,11 @@ from langchain.chains.combine_documents import create_stuff_documents_chain
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.chat_message_histories import ChatMessageHistory
-from langchain_community.vectorstores import FAISS   # ✅ FAISS instead of Chroma
-
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings
+
+# ✅ Community versions (works on Streamlit Cloud)
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
 
 # Load env
 load_dotenv()
@@ -38,11 +39,12 @@ with st.sidebar:
     chunk_size = st.slider("📏 Chunk Size", 500, 2000, 1000, step=100)
     chunk_overlap = st.slider("🔄 Chunk Overlap", 0, 500, 150, step=50)
 
-    # Vectorstore reset (not needed for FAISS but kept optional)
-    if st.button("🗑️ Reset Vectorstore"):
-        if "vectorstore" in st.session_state:
-            del st.session_state["vectorstore"]
-            st.success("✅ FAISS vectorstore cleared. Please re-upload PDFs.")
+    # Management
+    if st.button("🗑️ Delete Vectorstore"):
+        if os.path.exists("./faiss_index"):
+            import shutil
+            shutil.rmtree("./faiss_index")
+            st.success("✅ Vectorstore deleted. Please re-upload PDFs.")
 
     st.caption("Upload PDFs → Ask Questions → Summarize or Chat")
 
@@ -81,7 +83,7 @@ splits = text_splitter.split_documents(all_docs)
 # --- Vectorstore (FAISS) ---
 @st.cache_resource
 def get_vectorstore(_splits):
-    return FAISS.from_documents(_splits, embeddings)   # ✅ replaced Chroma with FAISS
+    return FAISS.from_documents(_splits, embeddings)
 
 vectorstore = get_vectorstore(splits)
 retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
