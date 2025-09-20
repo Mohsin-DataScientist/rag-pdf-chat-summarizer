@@ -80,9 +80,15 @@ text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_over
 splits = text_splitter.split_documents(all_docs)
 
 # --- Vectorstore ---
+# --- Vectorstore ---
 @st.cache_resource
 def get_vectorstore(_splits):
-    return Chroma.from_documents(_splits, embeddings, persist_directory="./chroma_index")
+    return Chroma.from_documents(
+        _splits,
+        embeddings,
+        persist_directory=None  # ⬅️ Force in-memory, no persistence needed
+    )
+
 
 vectorstore = get_vectorstore(splits)
 retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
@@ -171,3 +177,4 @@ with tab2:
         st.subheader("📑 Summary of PDFs")
         st.write(summary)
         st.download_button("⬇️ Download Summary", data=summary, file_name="pdf_summary.txt")
+
