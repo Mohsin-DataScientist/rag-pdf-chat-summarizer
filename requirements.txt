@@ -1,20 +1,25 @@
-# Core dependencies (pinned to latest stable releases as of early-Sep 2025)
+# Core dependencies for RAG PDF Chat + Summarizer
 
 streamlit==1.49.1
 python-dotenv==1.1.1
+
+# LangChain ecosystem
 langchain-core==0.3.75
 langchain-community==0.3.29
 langchain-groq==0.3.7
 langchain-huggingface==0.3.1
 langchain-chroma==0.2.5
 langchain-text-splitters==0.3.11
-pydantic==2.11.1
-chromadb==1.0.20
-pypdf==6.0.0
-sentence-transformers==5.1.0
-huggingface-hub==0.34.4
-torch==2.8.0
-numpy==2.3.3
-sentence-transformers==5.1.0
-langchain-openai
+langchain-openai==0.3.6
 
+# Vector store
+chromadb==0.5.5   # ✅ stable with langchain-chroma 0.2.5
+
+# NLP + embeddings (PyTorch-only, no TensorFlow)
+sentence-transformers==2.7.0
+huggingface-hub==0.34.4
+torch==2.3.1 --extra-index-url https://download.pytorch.org/whl/cpu
+numpy==1.26.4
+
+# PDF loader
+pypdf==4.2.0
